@@ -48,7 +48,9 @@ def generator_images(path, size=(420, 560, 3), ratio=2, batch_size=32):
             
             file_path = path + file
             img = img_as_float(Image.open(file_path))
-            
+            if len(img.shape) == 2: 
+                 img = np.asarray(np.dstack((img, img, img))) 
+
             batch[batch_i] = img
             batch_scaled[batch_i] = resize(img, (lr_height, lr_width))
             
