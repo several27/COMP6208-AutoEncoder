@@ -1,0 +1,5 @@
+*.h5
+*.npy
+.DS_store
+*.ipynb_checkpoints*
+mattochal/.ipynb_checkpoints/
