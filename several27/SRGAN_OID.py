@@ -10,6 +10,7 @@ from collections import defaultdict
 from keras import backend as K
 from keras.applications import ResNet50, VGG16
 from keras.callbacks import TensorBoard, ModelCheckpoint
+from keras.datasets import cifar10
 from keras.engine.topology import Layer
 from keras.layers import Input, Conv2D, PReLU, BatchNormalization, Add, LeakyReLU, Dense, Flatten, \
     GlobalAveragePooling2D, Dropout
@@ -17,7 +18,8 @@ from keras.layers.merge import Concatenate
 from keras.losses import binary_crossentropy, mean_squared_error
 from keras.models import Model, Sequential
 from keras.optimizers import Adam
-from keras.utils import conv_utils
+from keras.preprocessing.image import ImageDataGenerator
+from keras.utils import conv_utils, to_categorical
 from skimage.transform import resize
 from sklearn.model_selection import train_test_split
 from sklearn.utils import shuffle
@@ -557,7 +559,7 @@ def generator_images_classification(path_dataset, path_classes, path_classes_des
             batch_i += 1
 
 
-def generator_images_classification_places365(path_dataset, size=(256, 256, 3), batch_size=32):
+def generator_images_classification_places365(path_dataset, size=(256, 256, 3), batch_size=32, limit=None):
     classes = dict([(d, i) for i, d in enumerate(os.listdir(path_dataset))])
     size_classes = len(classes)
 
@@ -575,6 +577,8 @@ def generator_images_classification_places365(path_dataset, size=(256, 256, 3), 
             dir_files.append((dir, path_dir, file))
 
     dir_files = shuffle(dir_files, random_state=42)
+    if limit is not None:
+        dir_files = dir_files[:limit]
 
     while True:
         for dir, path_dir, file in dir_files:
@@ -618,12 +622,33 @@ def train_vgg(path_train, path_val, train_version, epochs, batch_size, dimension
         model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
         model.summary()
 
-        model.fit_generator(generator_images_classification_places365(path_train, dimensions, batch_size),
-                            steps_per_epoch=n_train // batch_size,
-                            validation_data=generator_images_classification_places365(path_val, dimensions, batch_size),
-                            validation_steps=n_val // batch_size, epochs=epochs, callbacks=[checkpointer, tb_callback])
+        model.fit_generator(generator_images_classification_places365(path_train, dimensions, batch_size, 25000),
+                            steps_per_epoch=25000 // batch_size,
+                            validation_data=generator_images_classification_places365(path_val, dimensions, batch_size,
+                                                                                      1000),
+                            validation_steps=25000 // batch_size, epochs=epochs, callbacks=[checkpointer, tb_callback])
 
         model.save_weights('data/vgg_%s.hdf5' % train_version)
+
+
+def train_vgg_cifar(train_version, epochs, batch_size, dimensions, ratio):
+    (x_train, y_train), (x_test, y_test) = cifar10.load_data()
+
+    num_classes = 10
+    y_train = to_categorical(y_train, num_classes)
+    y_test = to_categorical(y_test, num_classes)
+
+    checkpointer = ModelCheckpoint(filepath='data/vgg_cifar_weights_%s.{epoch:03d}_{val_acc:.4f}.hdf5' % train_version,
+                                   verbose=1, save_best_only=False)
+    tb_callback = TensorBoard(log_dir='data/tensorboard/', histogram_freq=0, write_graph=True, write_images=True)
+
+    with tf.device('/gpu:0'):
+        model = VGG16(weights=None, input_shape=dimensions, classes=num_classes)
+        model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+        model.summary()
+
+        model.fit(x_train, y_train, batch_size, epochs, [checkpointer, tb_callback], validation_data=(x_test, y_test))
+        model.save_weights('data/vgg_cifar_%s.hdf5' % train_version)
 
 
 def prepare_data():
@@ -663,16 +688,19 @@ def main():
 
     train_version = 11
     epochs = 1
-    batch_size = 32
+    batch_size = 16
 
     ratio = 4
     # dimensions = 256, 192, 3
     dimensions = 256, 256, 3
+    # dimensions = 32, 32, 3
 
     # train_generator(path_oid_test, path_oid_val, train_version, epochs, batch_size, dimensions, ratio)
     # train_discriminator(path_oid_test, path_oid_val, train_version, epochs, batch_size, dimensions, ratio)
     train_vgg(path_places36_train, path_places36_val, train_version, epochs, batch_size, dimensions, ratio)
     # train_srgan(path_oid_test, path_oid_val, train_version, epochs, batch_size, dimensions, ratio)
+
+    # train_vgg_cifar(train_version, epochs, batch_size, dimensions, ratio)
 
 
 if __name__ == '__main__':
