@@ -1,5 +1,6 @@
 import os
 
+import cv2
 import numpy as np
 import pandas as pd
 import tensorflow as tf
@@ -11,14 +12,15 @@ from keras.applications import ResNet50, VGG16
 from keras.callbacks import TensorBoard, ModelCheckpoint
 from keras.engine.topology import Layer
 from keras.layers import Input, Conv2D, PReLU, BatchNormalization, Add, LeakyReLU, Dense, Flatten, \
-    GlobalAveragePooling2D
+    GlobalAveragePooling2D, Dropout
 from keras.layers.merge import Concatenate
 from keras.losses import binary_crossentropy, mean_squared_error
-from keras.models import Model
+from keras.models import Model, Sequential
 from keras.optimizers import Adam
 from keras.utils import conv_utils
 from skimage.transform import resize
 from sklearn.model_selection import train_test_split
+from sklearn.utils import shuffle
 from tqdm import tqdm
 
 mpl.use('Agg')
@@ -159,7 +161,10 @@ def srgan_generator(input_shape, input_=None):
     return Model(input_1, conv2d_9)
 
 
-def count_images(path):
+def count_images(path, recursive=False):
+    if recursive:
+        return sum([1 for dir in os.listdir(path) for file in os.listdir(path + dir) if file.endswith('.jpg')])
+
     return sum([1 for file in os.listdir(path) if file.endswith('.jpg')])
 
 
@@ -542,7 +547,7 @@ def generator_images_classification(path_dataset, path_classes, path_classes_des
 
             file_path = path_dataset + file
 
-            img = np.array(Image.open(path_dataset + file))
+            img = np.array(open_resized_image(file_path, (size[0], size[1]))) / 255
             if len(img.shape) == 2:
                 img = np.asarray(np.dstack((img, img, img)))
             img = np.transpose(img, (1, 0, 2))
@@ -552,22 +557,70 @@ def generator_images_classification(path_dataset, path_classes, path_classes_des
             batch_i += 1
 
 
-def train_vgg(path_train, path_train_classes, path_val, path_val_classes, path_classes, train_version, epochs,
-              batch_size, dimensions, ratio):
+def generator_images_classification_places365(path_dataset, size=(256, 256, 3), batch_size=32):
+    classes = dict([(d, i) for i, d in enumerate(os.listdir(path_dataset))])
+    size_classes = len(classes)
+
+    batch_i = 0
+    batch = np.zeros((batch_size, size[0], size[1], size[2]))
+    batch_classes = np.zeros((batch_size, size_classes))
+
+    dir_files = []
+    for dir in os.listdir(path_dataset):
+        path_dir = path_dataset + dir + '/'
+        for file in os.listdir(path_dir):
+            if not file.endswith('.jpg'):
+                continue
+
+            dir_files.append((dir, path_dir, file))
+
+    dir_files = shuffle(dir_files, random_state=42)
+
+    while True:
+        for dir, path_dir, file in dir_files:
+            if batch_i == batch_size:
+                # plt.figure(figsize=(10, 100))
+                # for i, img in enumerate(batch[:10]):
+                #     plt.subplot(10, 1, i + 1)
+                #     plt.imshow(img)
+                # plt.savefig('data/srgan_progress/results_test.png')
+
+                yield batch, batch_classes
+
+                batch_i = 0
+                batch = np.zeros((batch_size, size[0], size[1], size[2]))
+                batch_classes = np.zeros((batch_size, size_classes))
+
+            file_path = path_dir + file
+
+            img = np.array(open_resized_image(file_path, (size[0], size[1]))) / 255
+            if len(img.shape) == 2:
+                img = np.asarray(np.dstack((img, img, img)))
+            img = np.transpose(img, (1, 0, 2))
+
+            batch[batch_i] = img
+            batch_classes[batch_i] = np.zeros(size_classes)
+            batch_classes[batch_i, classes[dir]] = 1
+            batch_i += 1
+
+
+def train_vgg(path_train, path_val, train_version, epochs, batch_size, dimensions, ratio):
     checkpointer = ModelCheckpoint(filepath='data/vgg_weights_%s.{epoch:03d}_{val_acc:.4f}.hdf5' % train_version,
                                    verbose=1, save_best_only=False)
     tb_callback = TensorBoard(log_dir='data/tensorboard/', histogram_freq=0, write_graph=True, write_images=True)
 
-    n_train = count_images(path_train)
-    n_val = count_images(path_val)
-    with tf.device('/gpu:0'):
-        model = VGG16(weights=None, input_shape=dimensions, classes=601)
-        model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+    classes = 365
 
-        model.fit_generator(generator_images_classification(path_train, path_train_classes, path_classes, dimensions,
-                                                            batch_size), steps_per_epoch=n_train // batch_size,
-                            validation_data=generator_images_classification(path_val, path_val_classes, path_classes,
-                                                                            dimensions, batch_size),
+    n_train = count_images(path_train, recursive=True)
+    n_val = count_images(path_val, recursive=True)
+    with tf.device('/gpu:0'):
+        model = VGG16(weights=None, input_shape=dimensions, classes=classes)
+        model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+        model.summary()
+
+        model.fit_generator(generator_images_classification_places365(path_train, dimensions, batch_size),
+                            steps_per_epoch=n_train // batch_size,
+                            validation_data=generator_images_classification_places365(path_val, dimensions, batch_size),
                             validation_steps=n_val // batch_size, epochs=epochs, callbacks=[checkpointer, tb_callback])
 
         model.save_weights('data/vgg_%s.hdf5' % train_version)
@@ -605,17 +658,20 @@ def main():
     path_oid_test_classes = path_data + 'oid_classes/test-annotations-human-imagelabels-boxable.csv'
     path_oid_val_classes = path_data + 'oid_classes/validation-annotations-human-imagelabels-boxable.csv'
 
-    train_version = 10
+    path_places36_train = path_data + 'places365_standard/train/'
+    path_places36_val = path_data + 'places365_standard/val/'
+
+    train_version = 11
     epochs = 1
-    batch_size = 64
+    batch_size = 32
 
     ratio = 4
-    dimensions = 256, 192, 3
+    # dimensions = 256, 192, 3
+    dimensions = 256, 256, 3
 
     # train_generator(path_oid_test, path_oid_val, train_version, epochs, batch_size, dimensions, ratio)
     # train_discriminator(path_oid_test, path_oid_val, train_version, epochs, batch_size, dimensions, ratio)
-    train_vgg(path_oid_resized_test, path_oid_test_classes, path_oid_resized_val, path_oid_val_classes,
-              path_oid_classes, train_version, epochs, batch_size, dimensions, ratio)
+    train_vgg(path_places36_train, path_places36_val, train_version, epochs, batch_size, dimensions, ratio)
     # train_srgan(path_oid_test, path_oid_val, train_version, epochs, batch_size, dimensions, ratio)
 
 
