@@ -475,13 +475,15 @@ def train_srgan(path_train, path_val, train_version, epochs, batch_size, dimensi
     discriminator_out = model_discriminator([generator_out, discriminator_in_original])
     model_srgan = Model([generator_in, discriminator_in_original], outputs=discriminator_out)
 
-    model_generator.compile(loss='mean_squared_error', optimizer='adam', metrics=['accuracy'])
+    model_generator.compile(loss=DSSIMObjective(), optimizer='adam', metrics=['accuracy'])
     model_discriminator.compile(optimizer=Adam(), loss='binary_crossentropy', metrics=['accuracy'])
     model_srgan.compile(optimizer=Adam(), loss=srgan_loss(generator_out, discriminator_in_original),
                         metrics=['accuracy'])
 
     model_generator.load_weights('data/srgan_generator_weights_11.018_0.9207.hdf5')
-    model_discriminator.load_weights('data/srgan_discriminator_10.hdf5')
+    model_discriminator.load_weights('data/srgan_discriminator_11.hdf5')
+
+    model_generator.load_weights('data/srgan_g_11.hdf5')
 
     checkpointer = ModelCheckpoint(
         filepath='data/srgan_srgan_weights_%s.{epoch:03d}_{val_acc:.4f}.hdf5' % train_version,
@@ -499,22 +501,20 @@ def train_srgan(path_train, path_val, train_version, epochs, batch_size, dimensi
 
             total = (n_train // batch_size) * 2
             with tqdm(total=total) as progress:
-                for X, y in generator_images_classification_places365(path_train, dimensions, batch_size=batch_size,
-                                                                      ratio=ratio, limit=n_train, net='generator'):
-                    x_batch_scaled, x_batch = X
-
+                gen_train = generator_images_classification_places365(path_train, dimensions, batch_size=batch_size,
+                                                                      ratio=ratio, limit=n_train, net='generator')
+                for x_batch_scaled, x_batch in gen_train:
                     set_trainable(model_generator, 'generator', True)
                     set_trainable(model_discriminator, 'discriminator', False)
-                    metrics_srgan = model_srgan.train_on_batch([x_batch_scaled, x_batch], [1] * batch_size)
-
-                    set_trainable(model_generator, 'generator', False)
-                    set_trainable(model_discriminator, 'discriminator', True)
+                    metrics_srgan = model_srgan.train_on_batch([x_batch_scaled, x_batch], np.ones(batch_size))
 
                     x_predicted_batch = model_generator.predict(x_batch_scaled)
                     x1_disc = np.concatenate([x_predicted_batch, x_batch])
                     x2_disc = np.concatenate([x_batch, x_batch])
                     y_disc = np.concatenate([np.zeros(batch_size), np.ones(batch_size)])
 
+                    set_trainable(model_generator, 'generator', False)
+                    set_trainable(model_discriminator, 'discriminator', True)
                     metrics_discriminator = model_discriminator.train_on_batch([x1_disc, x2_disc], y_disc)
 
                     progress.set_description('Srgan: %s: %s; %s: %s; Discriminator: %s: %s; %s: %s' %
@@ -528,28 +528,33 @@ def train_srgan(path_train, path_val, train_version, epochs, batch_size, dimensi
                         model_generator.save_weights('data/srgan_progress/srgan_g_%s_%s.hdf5' %
                                                      (train_version, progress.n))
 
-                        gen = generator_images_classification_places365(path_val, dimensions, batch_size=batch_size,
-                                                                        ratio=ratio, limit=n_val, net='generator')
+                        gen_test = generator_images_classification_places365(path_val, dimensions,
+                                                                             batch_size=batch_size, ratio=ratio,
+                                                                             limit=n_val, net='generator')
 
-                        plt.figure(figsize=(20, 80))
-                        for p_batch_scaled, p_batch in gen:
+                        plt.figure(figsize=(50, 15))
+                        for p_batch_scaled, p_batch in gen_test:
                             p_batch_predicted = np.abs(model_generator.predict(p_batch_scaled))
                             for i, p_img_scaled in enumerate(p_batch_scaled[:10]):
                                 p_img = p_batch[i]
                                 p_img_predicted = p_batch_predicted[i]
 
-                                plt.subplot(10, 3, (i * 3) + 1)
+                                plt.subplot(3, 10, i + 1)
                                 plt.imshow(p_img_scaled)
+                                plt.axis('off')
 
-                                plt.subplot(10, 3, (i * 3) + 2)
+                                plt.subplot(3, 10, i + 11)
                                 plt.imshow(p_img_predicted)
+                                plt.axis('off')
 
-                                plt.subplot(10, 3, (i * 3) + 3)
+                                plt.subplot(3, 10, i + 21)
                                 plt.imshow(p_img)
+                                plt.axis('off')
 
                             break
 
-                        plt.savefig('data/srgan_progress/results_%s_%s_%s.png' % (train_version, epoch, progress.n))
+                        plt.savefig('data/srgan_progress/results_%s_%s_%s.png' % (train_version, epoch, progress.n),
+                                    bbox_inches='tight')
 
                     if progress.n >= total:
                         break
@@ -1056,8 +1061,8 @@ def main_places365():
     path_places36_val = path_data + 'places365_standard/val/'
 
     train_version = 11
-    epochs = 2
-    batch_size = 64
+    epochs = 4
+    batch_size = 32
 
     ratio = 4
     # dimensions = 256, 192, 3
@@ -1067,7 +1072,7 @@ def main_places365():
     # train_generator(path_places36_train, path_places36_val, train_version, epochs, batch_size, dimensions, ratio)
     # train_discriminator(path_places36_train, path_places36_val, train_version, epochs, batch_size, dimensions, ratio)
     # train_vgg(path_places36_train, path_places36_val, train_version, epochs, batch_size, dimensions, ratio)
-    train_srgan(path_oid_test, path_oid_val, train_version, epochs, batch_size, dimensions, ratio)
+    train_srgan(path_places36_train, path_places36_val, train_version, epochs, batch_size, dimensions, ratio)
 
     # train_generator_cifar(train_version, epochs, batch_size, dimensions, ratio)
     # train_vgg_cifar(train_version, epochs, batch_size, dimensions, ratio)
@@ -1092,5 +1097,5 @@ def main_cifar():
 
 
 if __name__ == '__main__':
-    # main_places365()
-    main_cifar()
+    main_places365()
+    # main_cifar()
