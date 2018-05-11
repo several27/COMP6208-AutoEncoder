@@ -2,7 +2,15 @@
 <project version="4">
   <component name="WebServers">
     <option name="servers">
-      <webServer id="420f902f-90bd-446b-bb5f-a43271b5eba4" name="ec2-52-209-33-239.eu-west-1.compute.amazonaws.com" url="http://ec2-52-209-33-239.eu-west-1.compute.amazonaws.com">
+      <webServer id="7a7b02a4-5e6b-408f-9a6e-5e43928fefd4" name="p3" url="http://ec2-52-17-141-15.eu-west-1.compute.amazonaws.com">
+        <fileTransfer host="ec2-52-17-141-15.eu-west-1.compute.amazonaws.com" port="22" privateKey="$USER_HOME$/Documents/Developer/FuseMind/researchably-eu-west-1.pem" accessType="SFTP" keyPair="true">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" />
+          </advancedOptions>
+          <option name="port" value="22" />
+        </fileTransfer>
+      </webServer>
+      <webServer id="e6c93a07-a3f5-4288-8a63-b7ebadfee721" name="p2" url="http://ec2-52-209-33-239.eu-west-1.compute.amazonaws.com">
         <fileTransfer host="ec2-52-209-33-239.eu-west-1.compute.amazonaws.com" port="22" privateKey="$USER_HOME$/Documents/Developer/FuseMind/researchably-eu-west-1.pem" accessType="SFTP" keyPair="true">
           <advancedOptions>
             <advancedOptions dataProtectionLevel="Private" />

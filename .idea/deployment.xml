@@ -1,8 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" autoUpload="Always" serverName="ec2-52-209-33-239.eu-west-1.compute.amazonaws.com">
+  <component name="PublishConfigData" autoUpload="Always" serverName="p2">
     <serverData>
-      <paths name="ec2-52-209-33-239.eu-west-1.compute.amazonaws.com">
+      <paths name="p2">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/home/ubuntu/COMP6208-AutoEncoder/" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="p3">
         <serverdata>
           <mappings>
             <mapping deploy="/home/ubuntu/COMP6208-AutoEncoder/" local="$PROJECT_DIR$" web="/" />

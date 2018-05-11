@@ -1,25 +1,29 @@
 import os
+from multiprocessing.pool import Pool
 
 import cv2
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+import ujson
 from PIL import Image
 import matplotlib as mpl
 from collections import defaultdict
 from keras import backend as K
 from keras.applications import ResNet50, VGG16
+from keras.applications.vgg16 import WEIGHTS_PATH_NO_TOP
 from keras.callbacks import TensorBoard, ModelCheckpoint
 from keras.datasets import cifar10
 from keras.engine.topology import Layer
 from keras.layers import Input, Conv2D, PReLU, BatchNormalization, Add, LeakyReLU, Dense, Flatten, \
-    GlobalAveragePooling2D, Dropout
+    GlobalAveragePooling2D, Dropout, Convolution2D, MaxPooling2D, Activation
 from keras.layers.merge import Concatenate
 from keras.losses import binary_crossentropy, mean_squared_error
 from keras.models import Model, Sequential
-from keras.optimizers import Adam
+from keras.optimizers import Adam, SGD
 from keras.preprocessing.image import ImageDataGenerator
-from keras.utils import conv_utils, to_categorical
+from keras.utils import conv_utils, to_categorical, get_file
+from keras_contrib.losses import DSSIMObjective
 from skimage.transform import resize
 from sklearn.model_selection import train_test_split
 from sklearn.utils import shuffle
@@ -112,7 +116,7 @@ class PixelShuffler(Layer):
         return dict(list(base_config.items()) + list(config.items()))
 
 
-def srgan_generator(input_shape, input_=None):
+def srgan_generator(input_shape, input_=None, ratio=4):
     kernel_size = (3, 3)
     kernel_size_last = (9, 9)
     features = 64
@@ -148,7 +152,7 @@ def srgan_generator(input_shape, input_=None):
 
     # 8 - shuffle block
     last_layer = add_7
-    for i in range(2):
+    for i in range(ratio // 2):
         conv2d_8_A = Conv2D(filters=features_shuffle, kernel_size=kernel_size, strides=(1, 1), padding='same',
                             name='generator_conv2d_8_A_%s' % i)(last_layer)
         shuffler_8_B = PixelShuffler(name='generator_shuffler_8_B_%s' % i)(conv2d_8_A)
@@ -235,10 +239,6 @@ def generator_images(path, size=(1024, 768, 3), ratio=2, batch_size=32, discrimi
             batch_i += 1
 
 
-def chunks(*args, n_chunks):
-    return list(zip(*tuple([np.split(arg, n_chunks) for arg in args])))
-
-
 def generator_images_discriminator(path, size=(1024, 768, 3), ratio=2, batch_size=32, model_generator=None):
     lr_width, lr_height = size[0] // ratio, size[1] // ratio
 
@@ -249,6 +249,9 @@ def generator_images_discriminator(path, size=(1024, 768, 3), ratio=2, batch_siz
     batch = np.zeros((batch_size_predict, size[0], size[1], size[2]))
     batch_scaled = np.zeros((batch_size_predict, lr_width, lr_height, size[2]))
 
+    def _chunks(*args, n_chunks):
+        return list(zip(*tuple([np.split(arg, n_chunks) for arg in args])))
+
     while True:
         for file in os.listdir(path):
             if not file.endswith('.jpg'):
@@ -257,8 +260,8 @@ def generator_images_discriminator(path, size=(1024, 768, 3), ratio=2, batch_siz
             if batch_i == batch_size_predict:
                 batch_predicted = np.abs(model_generator.predict(batch_scaled))
 
-                for batch_chunk, batch_predicted_chunk in chunks(batch, batch_predicted,
-                                                                 n_chunks=batch_size_predict_scaler):
+                for batch_chunk, batch_predicted_chunk in _chunks(batch, batch_predicted,
+                                                                  n_chunks=batch_size_predict_scaler):
                     split = max(len(batch_chunk) // 2, 1)
                     batch_1, batch_2 = batch_chunk[:split], batch_chunk[split:]
 
@@ -338,7 +341,7 @@ def train_generator(path_train, path_val, train_version, epochs, batch_size, dim
     dimensions_small = dimensions[0] // ratio, dimensions[1] // ratio, dimensions[2]
 
     model_generator = srgan_generator(dimensions_small)
-    model_generator.compile(loss='mean_squared_error', optimizer='adam', metrics=['accuracy'])
+    model_generator.compile(loss=DSSIMObjective(), optimizer='adam', metrics=['accuracy'])
     model_generator.summary()
 
     checkpointer = ModelCheckpoint(
@@ -346,15 +349,47 @@ def train_generator(path_train, path_val, train_version, epochs, batch_size, dim
         verbose=1, save_best_only=False)
     tb_callback = TensorBoard(log_dir='data/tensorboard/', histogram_freq=0, write_graph=True, write_images=True)
 
-    n_train = count_images(path_train)
-    n_val = count_images(path_val)
+    n_train = 25000  # count_images(path_train)
+    n_val = 1000  # count_images(path_val)
     with tf.device('/gpu:0'):
-        model_generator.fit_generator(generator_images(path_train, dimensions, batch_size=batch_size, ratio=ratio),
-                                      steps_per_epoch=n_train // batch_size,
-                                      validation_data=generator_images(path_val, dimensions,
-                                                                       batch_size=batch_size, ratio=ratio),
-                                      validation_steps=n_val // batch_size, epochs=epochs,
-                                      callbacks=[checkpointer, tb_callback])
+        pass
+        # model_generator.fit_generator(
+        #     generator_images_classification_places365(path_train, dimensions, batch_size=batch_size, ratio=ratio,
+        #                                               limit=n_train, net='generator'),
+        #     steps_per_epoch=n_train // batch_size,
+        #     validation_data=generator_images_classification_places365(path_val, dimensions, batch_size=batch_size,
+        #                                                               ratio=ratio,
+        #                                                               limit=n_val, net='generator'),
+        #     validation_steps=n_val // batch_size, epochs=epochs,
+        #     callbacks=[checkpointer, tb_callback])
+
+        # model_generator.fit_generator(generator_images(path_train, dimensions, batch_size=batch_size, ratio=ratio),
+        #                               steps_per_epoch=n_train // batch_size,
+        #                               validation_data=generator_images(path_val, dimensions,
+        #                                                                batch_size=batch_size, ratio=ratio),
+        #                               validation_steps=n_val // batch_size, epochs=epochs,
+        #                               callbacks=[checkpointer, tb_callback])
+
+    model_generator.load_weights('data/srgan_generator_weights_11.018_0.9207.hdf5')
+
+    plt.figure(figsize=(20, 80))
+    img_gen = generator_images_classification_places365(path_val, dimensions, batch_size=batch_size, ratio=ratio,
+                                                        limit=n_val, net='generator')
+    for x_test_batch in img_gen:
+        x_test_predicted = np.abs(model_generator.predict(x_test_batch[0]))
+        for i, x_test_img in enumerate(x_test_batch[1][:10]):
+            plt.subplot(10, 3, (i * 3) + 1)
+            plt.imshow(x_test_batch[0][i])
+
+            plt.subplot(10, 3, (i * 3) + 2)
+            plt.imshow(x_test_predicted[i])
+
+            plt.subplot(10, 3, (i * 3) + 3)
+            plt.imshow(x_test_img)
+
+        break
+
+    plt.savefig('data/srgan_generator_places365_results_%s.png' % (train_version))
 
 
 def train_discriminator(path_train, path_val, train_version, epochs, batch_size, dimensions, ratio):
@@ -370,15 +405,15 @@ def train_discriminator(path_train, path_val, train_version, epochs, batch_size,
     model_discriminator.compile(optimizer=Adam(1e-3), loss='binary_crossentropy', metrics=['accuracy'])
     model_discriminator.summary()
 
-    model_generator.load_weights('data/srgan_generator_weights_10.000_0.7948.hdf5')
+    model_generator.load_weights('data/srgan_generator_weights_11.018_0.9207.hdf5')
 
     checkpointer = ModelCheckpoint(
         filepath='data/srgan_discriminator_weights_%s.{epoch:03d}_{val_acc:.4f}.hdf5' % train_version,
         verbose=1, save_best_only=False)
     tb_callback = TensorBoard(log_dir='data/tensorboard/', histogram_freq=0, write_graph=True, write_images=True)
 
-    n_train = count_images(path_train)
-    n_val = count_images(path_val)
+    n_train = 1000  # count_images(path_train)
+    n_val = 100  # count_images(path_val)
 
     metrics_names = model_discriminator.metrics_names
     with tf.device('/gpu:0'):
@@ -386,22 +421,23 @@ def train_discriminator(path_train, path_val, train_version, epochs, batch_size,
             print()
             print('Epoch %s / %s' % (epoch, epochs))
 
-            total = (n_train // batch_size) * 2
-            total = 1000
-            with tqdm(total=total) as progress:
-                for X, y in generator_images_discriminator(path_train, dimensions, batch_size=batch_size, ratio=ratio,
-                                                           model_generator=model_generator):
+            with tqdm(total=n_train) as progress:
+                for X, y in generator_images_classification_places365(path_train, dimensions, batch_size=batch_size,
+                                                                      ratio=ratio, net='discriminator',
+                                                                      model_generator=model_generator, limit=n_train):
                     metrics = model_discriminator.train_on_batch(X, y)
                     progress.set_description('Discriminator: %s: %s; %s: %s;' %
                                              (metrics_names[0], metrics[0], metrics_names[1], metrics[1]))
                     progress.update()
 
-                    if progress.n >= total:
+                    if progress.n >= n_train:
                         break
 
                 eval_metrics = model_discriminator.evaluate_generator(
-                    generator_images_discriminator(path_val, dimensions, batch_size=batch_size, ratio=ratio,
-                                                   model_generator=model_generator),
+                    generator_images_classification_places365(path_val, dimensions, batch_size=batch_size,
+                                                              ratio=ratio, net='discriminator',
+                                                              model_generator=model_generator,
+                                                              limit=n_val),
                     (n_val // batch_size) * 2)
                 print('Model discriminator evaluation: %s: %s; %s: %s;' % (metrics_names[0], eval_metrics[0],
                                                                            metrics_names[1], eval_metrics[1]))
@@ -411,8 +447,10 @@ def train_discriminator(path_train, path_val, train_version, epochs, batch_size,
 
 def srgan_loss(_generator_output, _discriminator_in_original):
     def _srgan_loss(y_true, y_pred):
-        return binary_crossentropy(y_true, y_pred) + \
-               K.sum(mean_squared_error(_generator_output, _discriminator_in_original), axis=(-1, -2))
+        # return binary_crossentropy(y_true, y_pred) + \
+        #        K.sum(mean_squared_error(_generator_output, _discriminator_in_original), axis=(-1, -2))
+
+        return binary_crossentropy(y_true, y_pred) + DSSIMObjective()(_generator_output, _discriminator_in_original)
 
     return _srgan_loss
 
@@ -442,7 +480,7 @@ def train_srgan(path_train, path_val, train_version, epochs, batch_size, dimensi
     model_srgan.compile(optimizer=Adam(), loss=srgan_loss(generator_out, discriminator_in_original),
                         metrics=['accuracy'])
 
-    model_generator.load_weights('data/srgan_generator_weights_10.000_0.7948.hdf5')
+    model_generator.load_weights('data/srgan_generator_weights_11.018_0.9207.hdf5')
     model_discriminator.load_weights('data/srgan_discriminator_10.hdf5')
 
     checkpointer = ModelCheckpoint(
@@ -450,8 +488,8 @@ def train_srgan(path_train, path_val, train_version, epochs, batch_size, dimensi
         verbose=1, save_best_only=False)
     tb_callback = TensorBoard(log_dir='data/tensorboard/', histogram_freq=0, write_graph=True, write_images=True)
 
-    n_train = count_images(path_train)
-    n_val = count_images(path_val)
+    n_train = 10 * 1000  # count_images(path_train)
+    n_val = 1000  # count_images(path_val)
 
     metrics_names = model_discriminator.metrics_names
     with tf.device('/gpu:0'):
@@ -461,16 +499,23 @@ def train_srgan(path_train, path_val, train_version, epochs, batch_size, dimensi
 
             total = (n_train // batch_size) * 2
             with tqdm(total=total) as progress:
-                for X, y in generator_images_discriminator(path_train, dimensions, batch_size=batch_size, ratio=ratio,
-                                                           model_generator=model_generator):
+                for X, y in generator_images_classification_places365(path_train, dimensions, batch_size=batch_size,
+                                                                      ratio=ratio, limit=n_train, net='generator'):
+                    x_batch_scaled, x_batch = X
+
                     set_trainable(model_generator, 'generator', True)
                     set_trainable(model_discriminator, 'discriminator', False)
-                    X_small = np.array([resize(x, (dimensions_small[0], dimensions_small[1])) for x in X[1]])
-                    metrics_srgan = model_srgan.train_on_batch([X_small, X[1]], [1] * batch_size)
+                    metrics_srgan = model_srgan.train_on_batch([x_batch_scaled, x_batch], [1] * batch_size)
 
                     set_trainable(model_generator, 'generator', False)
                     set_trainable(model_discriminator, 'discriminator', True)
-                    metrics_discriminator = model_discriminator.train_on_batch(X, y)
+
+                    x_predicted_batch = model_generator.predict(x_batch_scaled)
+                    x1_disc = np.concatenate([x_predicted_batch, x_batch])
+                    x2_disc = np.concatenate([x_batch, x_batch])
+                    y_disc = np.concatenate([np.zeros(batch_size), np.ones(batch_size)])
+
+                    metrics_discriminator = model_discriminator.train_on_batch([x1_disc, x2_disc], y_disc)
 
                     progress.set_description('Srgan: %s: %s; %s: %s; Discriminator: %s: %s; %s: %s' %
                                              (metrics_names[0], metrics_srgan[0], metrics_names[1], metrics_srgan[1],
@@ -483,9 +528,11 @@ def train_srgan(path_train, path_val, train_version, epochs, batch_size, dimensi
                         model_generator.save_weights('data/srgan_progress/srgan_g_%s_%s.hdf5' %
                                                      (train_version, progress.n))
 
+                        gen = generator_images_classification_places365(path_val, dimensions, batch_size=batch_size,
+                                                                        ratio=ratio, limit=n_val, net='generator')
+
                         plt.figure(figsize=(20, 80))
-                        for p_batch_scaled, p_batch in generator_images(path_val, dimensions, batch_size=20,
-                                                                        ratio=ratio):
+                        for p_batch_scaled, p_batch in gen:
                             p_batch_predicted = np.abs(model_generator.predict(p_batch_scaled))
                             for i, p_img_scaled in enumerate(p_batch_scaled[:10]):
                                 p_img = p_batch[i]
@@ -502,14 +549,15 @@ def train_srgan(path_train, path_val, train_version, epochs, batch_size, dimensi
 
                             break
 
-                        plt.savefig('data/srgan_progress/results_%s_%s.png' % (train_version, progress.n))
+                        plt.savefig('data/srgan_progress/results_%s_%s_%s.png' % (train_version, epoch, progress.n))
 
                     if progress.n >= total:
                         break
 
-                eval_g = model_generator.evaluate_generator(generator_images(path_val, dimensions,
-                                                                             batch_size=batch_size, ratio=ratio),
-                                                            steps=n_val // batch_size)
+                eval_g = model_generator.evaluate_generator(
+                    generator_images_classification_places365(path_val, dimensions, batch_size=batch_size,
+                                                              ratio=ratio, limit=n_val, net='generator'),
+                    steps=n_val // batch_size)
                 print('Model generator evaluation: %s: %s; %s: %s' % (metrics_names[0], eval_g[0], metrics_names[1],
                                                                       eval_g[1]))
 
@@ -559,53 +607,124 @@ def generator_images_classification(path_dataset, path_classes, path_classes_des
             batch_i += 1
 
 
-def generator_images_classification_places365(path_dataset, size=(256, 256, 3), batch_size=32, limit=None):
-    classes = dict([(d, i) for i, d in enumerate(os.listdir(path_dataset))])
-    size_classes = len(classes)
+def chunks(l, batch_size, size, classes, size_classes, lr_width, lr_height, net, model_generator):
+    """Yield successive n-sized chunks from l."""
+    for i in range(0, len(l), batch_size):
+        yield l[i:i + batch_size], batch_size, size, classes, size_classes, lr_width, lr_height, net, model_generator
+
+
+def _generator_images_classification_places365(params):
+    dir_files, batch_size, size, classes, size_classes, lr_width, lr_height, net, model_generator = params
 
     batch_i = 0
     batch = np.zeros((batch_size, size[0], size[1], size[2]))
     batch_classes = np.zeros((batch_size, size_classes))
+    batch_scaled = np.zeros((batch_size, lr_width, lr_height, size[2]))
 
-    dir_files = []
-    for dir in os.listdir(path_dataset):
-        path_dir = path_dataset + dir + '/'
-        for file in os.listdir(path_dir):
-            if not file.endswith('.jpg'):
-                continue
+    for dir, path_dir, file in dir_files:
+        file_path = path_dir + file
 
-            dir_files.append((dir, path_dir, file))
+        img = np.array(open_resized_image(file_path, (size[0], size[1]))) / 255
+        if len(img.shape) == 2:
+            img = np.asarray(np.dstack((img, img, img)))
+        img = np.transpose(img, (1, 0, 2))
 
-    dir_files = shuffle(dir_files, random_state=42)
-    if limit is not None:
-        dir_files = dir_files[:limit]
+        batch[batch_i] = img
+        batch_classes[batch_i] = np.zeros(size_classes)
+        batch_classes[batch_i, classes[dir]] = 1
+        batch_scaled[batch_i] = resize(img, (lr_height, lr_width))
+        batch_i += 1
+
+    if batch_i < batch_size:
+        return None
+
+    if net == 'classification':
+        return batch, batch_classes
+    elif net == 'generator':
+        return batch_scaled, batch
+    elif net == 'discriminator':
+        batch_predicted = model_generator.predict(batch_scaled)
+
+        return [
+                   np.concatenate([batch_predicted, batch]),
+                   np.concatenate([batch, batch]),
+               ], np.concatenate([np.zeros(batch.shape[0]), np.ones(batch.shape[0])])
+
+
+def generator_images_classification_places365(path_dataset, size=(256, 256, 3), batch_size=32, ratio=4, limit=None,
+                                              net='classification', model_generator=None):
+    classes = dict([(d, i) for i, d in enumerate(os.listdir(path_dataset))])
+    size_classes = len(classes)
+
+    lr_width, lr_height = size[0] // ratio, size[1] // ratio
+
+    path_files_list = 'data/places365_%s.json' % limit
+    if os.path.isfile(path_files_list):
+        with open(path_files_list, 'r') as _in:
+            dir_files = ujson.load(_in)
+    else:
+        dir_files = []
+        for dir in os.listdir(path_dataset):
+            path_dir = path_dataset + dir + '/'
+            for file in os.listdir(path_dir):
+                if not file.endswith('.jpg'):
+                    continue
+
+                dir_files.append((dir, path_dir, file))
+
+        dir_files = shuffle(dir_files, random_state=42)
+        if limit is not None:
+            dir_files = dir_files[:limit]
+
+        with open(path_files_list, 'w') as _out:
+            ujson.dump(dir_files, _out)
 
     while True:
-        for dir, path_dir, file in dir_files:
-            if batch_i == batch_size:
-                # plt.figure(figsize=(10, 100))
-                # for i, img in enumerate(batch[:10]):
-                #     plt.subplot(10, 1, i + 1)
-                #     plt.imshow(img)
-                # plt.savefig('data/srgan_progress/results_test.png')
+        chunks_iter = chunks(dir_files, batch_size, size, classes, size_classes, lr_width, lr_height, net,
+                             model_generator)
+        for data in chunks_iter:
+            data = _generator_images_classification_places365(data)
 
-                yield batch, batch_classes
+            if data is None:
+                continue
 
-                batch_i = 0
-                batch = np.zeros((batch_size, size[0], size[1], size[2]))
-                batch_classes = np.zeros((batch_size, size_classes))
+            yield data
 
-            file_path = path_dir + file
 
-            img = np.array(open_resized_image(file_path, (size[0], size[1]))) / 255
-            if len(img.shape) == 2:
-                img = np.asarray(np.dstack((img, img, img)))
-            img = np.transpose(img, (1, 0, 2))
+def srgan_vgg(input_shape, classes):
+    # Append the initial inputs to the outputs of the SRResNet
+    x_in = Input(input_shape)
 
-            batch[batch_i] = img
-            batch_classes[batch_i] = np.zeros(size_classes)
-            batch_classes[batch_i, classes[dir]] = 1
-            batch_i += 1
+    # Begin adding the VGG layers
+    x = Conv2D(64, 3, 3, activation='relu', name='vgg_conv1_1', border_mode='same')(x_in)
+
+    x = Conv2D(64, 3, 3, activation='relu', name='vgg_conv1_2', border_mode='same')(x)
+    x = MaxPooling2D(name='vgg_maxpool1')(x)
+
+    x = Conv2D(128, 3, 3, activation='relu', name='vgg_conv2_1', border_mode='same')(x)
+
+    x = Conv2D(128, 3, 3, activation='relu', name='vgg_conv2_2', border_mode='same')(x)
+    x = MaxPooling2D(name='vgg_maxpool2')(x)
+
+    x = Conv2D(256, 3, 3, activation='relu', name='vgg_conv3_1', border_mode='same')(x)
+    x = Conv2D(256, 3, 3, activation='relu', name='vgg_conv3_2', border_mode='same')(x)
+
+    x = Conv2D(256, 3, 3, activation='relu', name='vgg_conv3_3', border_mode='same')(x)
+    x = MaxPooling2D(name='vgg_maxpool3')(x)
+
+    x = Conv2D(512, 3, 3, activation='relu', name='vgg_conv4_1', border_mode='same')(x)
+    x = Conv2D(512, 3, 3, activation='relu', name='vgg_conv4_2', border_mode='same')(x)
+
+    x = Conv2D(512, 3, 3, activation='relu', name='vgg_conv4_3', border_mode='same')(x)
+    x = MaxPooling2D(name='vgg_maxpool4')(x)
+
+    x = Conv2D(512, 3, 3, activation='relu', name='vgg_conv5_1', border_mode='same')(x)
+    x = Conv2D(512, 3, 3, activation='relu', name='vgg_conv5_2', border_mode='same')(x)
+
+    x = Convolution2D(512, 3, 3, activation='relu', name='vgg_conv5_3', border_mode='same')(x)
+    x = MaxPooling2D(name='vgg_maxpool5')(x)
+
+    return Model(x_in, x)
 
 
 def train_vgg(path_train, path_val, train_version, epochs, batch_size, dimensions, ratio):
@@ -615,24 +734,49 @@ def train_vgg(path_train, path_val, train_version, epochs, batch_size, dimension
 
     classes = 365
 
-    n_train = count_images(path_train, recursive=True)
-    n_val = count_images(path_val, recursive=True)
+    n_train = 1000 * 1000  # count_images(path_train, recursive=True)
+    n_val = 1000  # count_images(path_val, recursive=True)
     with tf.device('/gpu:0'):
-        model = VGG16(weights=None, input_shape=dimensions, classes=classes)
+        base_model = srgan_vgg(input_shape=dimensions, classes=classes)
+
+        # weights_path = get_file('vgg16_weights_tf_dim_ordering_tf_kernels_notop.h5',
+        #                         WEIGHTS_PATH_NO_TOP,
+        #                         cache_subdir='models',
+        #                         file_hash='6d6bbae143d832006294945121d1f1fc')
+        # base_model.load_weights(weights_path)
+
+        # for l in base_model.layers:
+        #     l.trainable = False
+
+        top_model = base_model.output
+        top_model = Flatten()(top_model)
+        top_model = Dense(512, activation='relu')(top_model)
+        top_model = BatchNormalization()(top_model)
+
+        top_model = Dropout(0.5)(top_model)
+        top_model = Dense(classes, activation='softmax')(top_model)
+
+        model = Model(base_model.input, top_model)
         model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
         model.summary()
 
-        model.fit_generator(generator_images_classification_places365(path_train, dimensions, batch_size, 25000),
-                            steps_per_epoch=25000 // batch_size,
-                            validation_data=generator_images_classification_places365(path_val, dimensions, batch_size,
-                                                                                      1000),
-                            validation_steps=25000 // batch_size, epochs=epochs, callbacks=[checkpointer, tb_callback])
+        model.load_weights('data/vgg_pretrained_200k/vgg_weights_11.007_0.2135.hdf5')
+
+        model.fit_generator(
+            generator_images_classification_places365(path_train, dimensions, batch_size, limit=n_train),
+            steps_per_epoch=n_train // batch_size,
+            validation_data=generator_images_classification_places365(path_val, dimensions, batch_size,
+                                                                      limit=n_val),
+            validation_steps=n_val // batch_size, epochs=epochs, callbacks=[checkpointer, tb_callback])
 
         model.save_weights('data/vgg_%s.hdf5' % train_version)
 
 
 def train_vgg_cifar(train_version, epochs, batch_size, dimensions, ratio):
     (x_train, y_train), (x_test, y_test) = cifar10.load_data()
+
+    x_train = x_train / 255
+    x_test = x_test / 255
 
     num_classes = 10
     y_train = to_categorical(y_train, num_classes)
@@ -643,12 +787,237 @@ def train_vgg_cifar(train_version, epochs, batch_size, dimensions, ratio):
     tb_callback = TensorBoard(log_dir='data/tensorboard/', histogram_freq=0, write_graph=True, write_images=True)
 
     with tf.device('/gpu:0'):
-        model = VGG16(weights=None, input_shape=dimensions, classes=num_classes)
+        base_model = srgan_vgg(input_shape=dimensions, classes=num_classes)
+
+        weights_path = get_file('vgg16_weights_tf_dim_ordering_tf_kernels_notop.h5',
+                                WEIGHTS_PATH_NO_TOP,
+                                cache_subdir='models',
+                                file_hash='6d6bbae143d832006294945121d1f1fc')
+        base_model.load_weights(weights_path)
+
+        # for l in base_model.layers:
+        #     l.trainable = False
+
+        top_model = base_model.output
+        top_model = Flatten()(top_model)
+        top_model = Dense(512, activation='relu')(top_model)
+        top_model = BatchNormalization()(top_model)
+
+        top_model = Dropout(0.5)(top_model)
+        top_model = Dense(num_classes, activation='softmax')(top_model)
+
+        model = Model(base_model.input, top_model)
         model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
         model.summary()
 
-        model.fit(x_train, y_train, batch_size, epochs, [checkpointer, tb_callback], validation_data=(x_test, y_test))
+        model.load_weights('data/vgg_cifar_weights_12.010_0.8011.hdf5')
+
+        model.fit(x_train, y_train, batch_size=batch_size, epochs=epochs, callbacks=[checkpointer, tb_callback],
+                  validation_data=(x_test, y_test), verbose=1)
         model.save_weights('data/vgg_cifar_%s.hdf5' % train_version)
+
+
+def train_generator_cifar(train_version, epochs, batch_size, dimensions, ratio):
+    dimensions_small = dimensions[0] // ratio, dimensions[1] // ratio, dimensions[2]
+
+    (x_train, y_train), (x_test, y_test) = cifar10.load_data()
+
+    x_train = x_train / 255
+    x_test = x_test / 255
+
+    num_classes = 10
+
+    x_train_scaled = np.asarray([resize(img, dimensions_small) for img in x_train])
+    x_test_scaled = np.asarray([resize(img, dimensions_small) for img in x_test])
+
+    model_generator = srgan_generator(dimensions_small, ratio=ratio)
+    model_generator.compile(loss=DSSIMObjective(), optimizer='adam', metrics=['accuracy'])
+    model_generator.summary()
+
+    checkpointer = ModelCheckpoint(
+        filepath='data/srgan_generator_cifar_dssim_weights_%s.{epoch:03d}_{val_acc:.4f}.hdf5' % train_version,
+        verbose=1, save_best_only=False)
+    tb_callback = TensorBoard(log_dir='data/tensorboard/srgan_generator_cifar_%s/', histogram_freq=0, write_graph=True,
+                              write_images=True)
+
+    # with tf.device('/gpu:0'):
+    #     model_generator.fit(x_train_scaled, x_train, batch_size=batch_size, epochs=epochs,
+    #                         callbacks=[checkpointer, tb_callback], validation_data=(x_test_scaled, x_test),
+    #                         verbose=1)
+    #     model_generator.save_weights('data/srgan_generator_cifar_dssim_%s.hdf5' % train_version)
+
+    model_generator.load_weights('data/srgan_generator_cifar_dssim_weights_12.005_0.8808.hdf5')
+
+    plt.figure(figsize=(20, 80))
+    x_test_predicted = np.abs(model_generator.predict(x_test_scaled[:10]))
+    for i, x_test_img in enumerate(x_test[:10]):
+        plt.subplot(10, 3, (i * 3) + 1)
+        plt.imshow(x_test_scaled[i])
+
+        plt.subplot(10, 3, (i * 3) + 2)
+        plt.imshow(x_test_predicted[i])
+
+        plt.subplot(10, 3, (i * 3) + 3)
+        plt.imshow(x_test_img)
+
+    plt.savefig('data/srgan_generator_cifar_dssim_results_%s.png' % (train_version))
+
+
+def train_discriminator_cifar(train_version, epochs, batch_size, dimensions, ratio):
+    dimensions_small = dimensions[0] // ratio, dimensions[1] // ratio, dimensions[2]
+
+    (x_train, y_train), (x_test, y_test) = cifar10.load_data()
+
+    x_train = x_train / 255
+    x_test = x_test / 255
+
+    num_classes = 10
+
+    x_train_scaled = np.asarray([resize(img, dimensions_small) for img in x_train])
+    x_test_scaled = np.asarray([resize(img, dimensions_small) for img in x_test])
+
+    model_generator = srgan_generator(dimensions_small, ratio=ratio)
+    model_generator.compile(loss='mean_squared_error', optimizer='adam', metrics=['accuracy'])
+    model_generator.summary()
+    model_generator.load_weights('data/srgan_generator_cifar_dssim_weights_12.005_0.8808.hdf5')
+
+    x_train_pred = np.concatenate([x_train, model_generator.predict(x_train_scaled)])
+    x_test_pred = np.concatenate([x_test, model_generator.predict(x_test_scaled)])
+
+    y_train = np.concatenate([np.ones(x_train.shape[0]), np.zeros(x_train.shape[0])])
+    y_test = np.concatenate([np.ones(x_test.shape[0]), np.zeros(x_test.shape[0])])
+
+    x_train = np.concatenate([x_train, x_train])
+    x_test = np.concatenate([x_test, x_test])
+
+    x_train, x_train_pred, y_train = shuffle(x_train, x_train_pred, y_train)
+    x_test, x_test_pred, y_test = shuffle(x_test, x_test_pred, y_test)
+
+    discriminator_input_prediction = Input(shape=dimensions)
+    discriminator_input_original = Input(shape=dimensions)
+    model_discriminator = srgan_discriminator(discriminator_input_prediction, discriminator_input_original)
+
+    model_discriminator.compile(optimizer=Adam(1e-3), loss='binary_crossentropy', metrics=['accuracy'])
+    model_discriminator.summary()
+
+    checkpointer = ModelCheckpoint(
+        filepath='data/srgan_discriminator_cifar_dssim_weights_%s.{epoch:03d}_{val_acc:.4f}.hdf5' % train_version,
+        verbose=1, save_best_only=False)
+    tb_callback = TensorBoard(log_dir='data/tensorboard/srgan_discriminator_cifar_%s/', histogram_freq=0,
+                              write_graph=True, write_images=True)
+
+    with tf.device('/gpu:0'):
+        model_discriminator.fit([x_train_pred, x_train], y_train, batch_size=batch_size, epochs=epochs,
+                                callbacks=[checkpointer, tb_callback], validation_data=([x_test_pred, x_test], y_test),
+                                verbose=1)
+        model_discriminator.save_weights('data/discriminator_cifar_dssim_%s.hdf5' % train_version)
+
+
+def train_srgan_cifar(train_version, epochs, batch_size, dimensions, ratio):
+    dimensions_small = dimensions[0] // ratio, dimensions[1] // ratio, dimensions[2]
+
+    (x_train, y_train), (x_test, y_test) = cifar10.load_data()
+
+    x_train = x_train / 255
+    x_test = x_test / 255
+
+    num_classes = 10
+
+    x_train_scaled = np.asarray([resize(img, dimensions_small) for img in x_train])
+    x_test_scaled = np.asarray([resize(img, dimensions_small) for img in x_test])
+
+    x_train, x_train_scaled = shuffle(x_train, x_train_scaled)
+    x_test, x_test_scaled = shuffle(x_test, x_test_scaled)
+
+    generator_in = Input(shape=dimensions_small)
+    model_generator = srgan_generator(dimensions_small, input_=generator_in, ratio=ratio)
+
+    discriminator_in_predicted = Input(shape=dimensions)
+    discriminator_in_original = Input(shape=dimensions)
+    model_discriminator = srgan_discriminator(discriminator_in_predicted, discriminator_in_original)
+
+    generator_out = model_generator(generator_in)
+    discriminator_out = model_discriminator([generator_out, discriminator_in_original])
+    model_srgan = Model([generator_in, discriminator_in_original], outputs=discriminator_out)
+
+    model_generator.compile(loss=DSSIMObjective(), optimizer='adam', metrics=['accuracy'])
+    model_discriminator.compile(optimizer=Adam(), loss='binary_crossentropy', metrics=['accuracy'])
+    model_srgan.compile(optimizer=Adam(), loss=srgan_loss(generator_out, discriminator_in_original),
+                        metrics=['accuracy'])
+
+    model_generator.load_weights('data/srgan_generator_cifar_dssim_weights_12.005_0.8808.hdf5')
+    model_discriminator.load_weights('data/srgan_discriminator_cifar_dssim_weights_12.010_0.9999.hdf5')
+
+    def cifar_chunks(l1, l2, batch_size):
+        for i in range(0, len(l1), batch_size):
+            if len(l1) < i + batch_size:
+                break
+
+            yield l1[i:i + batch_size], l2[i:i + batch_size]
+
+    metrics_names = model_discriminator.metrics_names
+    with tf.device('/gpu:0'):
+        for epoch in range(epochs):
+            print()
+            print('Epoch %s / %s' % (epoch, epochs))
+
+            total = x_train.shape[0] // batch_size
+            with tqdm(total=total) as progress:
+                for i, (x_train_batch, x_train_scaled_batch) in enumerate(cifar_chunks(x_train, x_train_scaled,
+                                                                                       batch_size)):
+                    set_trainable(model_generator, 'generator', True)
+                    set_trainable(model_discriminator, 'discriminator', False)
+                    metrics_srgan = model_srgan.train_on_batch([x_train_scaled_batch, x_train_batch],
+                                                               np.ones(batch_size))
+
+                    x_train_predicted_batch = model_generator.predict(x_train_scaled_batch)
+                    x1_disc = np.concatenate([x_train_predicted_batch, x_train_batch])
+                    x2_disc = np.concatenate([x_train_batch, x_train_batch])
+                    y_disc = np.concatenate([np.zeros(batch_size), np.ones(batch_size)])
+
+                    set_trainable(model_generator, 'generator', False)
+                    set_trainable(model_discriminator, 'discriminator', True)
+                    metrics_discriminator = model_discriminator.train_on_batch([x1_disc, x2_disc], y_disc)
+
+                    progress.set_description('Srgan: %s: %s; %s: %s; Discriminator: %s: %s; %s: %s' %
+                                             (metrics_names[0], metrics_srgan[0], metrics_names[1], metrics_srgan[1],
+                                              metrics_names[0], metrics_discriminator[0], metrics_names[1],
+                                              metrics_discriminator[1]))
+                    progress.update()
+
+                    if progress.n % 100 == 0:
+                        model_srgan.save_weights('data/srgan_progress/srgan_%s_%s.hdf5' % (train_version, progress.n))
+                        model_generator.save_weights('data/srgan_progress/srgan_g_%s_%s.hdf5' %
+                                                     (train_version, progress.n))
+
+                        plt.figure(figsize=(50, 15))
+                        x_test_predicted = np.abs(model_generator.predict(x_test_scaled[:10]))
+                        for i, x_test_img in enumerate(x_test[:10]):
+                            plt.subplot(3, 10, i + 1)
+                            plt.imshow(x_test_scaled[i])
+                            plt.axis('off')
+
+                            plt.subplot(3, 10, i + 11)
+                            plt.imshow(x_test_predicted[i])
+                            plt.axis('off')
+
+                            plt.subplot(3, 10, i + 21)
+                            plt.imshow(x_test_img)
+                            plt.axis('off')
+
+                        # plt.subplots_adjust(top=1, bottom=0, right=1, left=0, hspace=0, wspace=0)
+                        plt.savefig('data/srgan_progress/results_%s_%s_%s.png' % (train_version, epoch, progress.n),
+                                    bbox_inches='tight')
+
+                    if progress.n >= total:
+                        break
+
+                eval_g = model_generator.evaluate(x_test_scaled, x_test)
+                print('Model generator evaluation: %s: %s; %s: %s' % (metrics_names[0], eval_g[0], metrics_names[1],
+                                                                      eval_g[1]))
+
+        model_srgan.save_weights('data/srgan_cifar_%s.hdf5' % train_version)
+        model_generator.save_weights('data/srgan_cifar_g_%s.hdf5' % train_version)
 
 
 def prepare_data():
@@ -668,7 +1037,7 @@ def prepare_data():
             progress.update()
 
 
-def main():
+def main_places365():
     path_data = 'data/'
     path_oid_train = path_data + 'train/'
     path_oid_test = path_data + 'test/'
@@ -687,21 +1056,41 @@ def main():
     path_places36_val = path_data + 'places365_standard/val/'
 
     train_version = 11
-    epochs = 1
-    batch_size = 16
+    epochs = 2
+    batch_size = 64
 
     ratio = 4
     # dimensions = 256, 192, 3
     dimensions = 256, 256, 3
     # dimensions = 32, 32, 3
 
-    # train_generator(path_oid_test, path_oid_val, train_version, epochs, batch_size, dimensions, ratio)
-    # train_discriminator(path_oid_test, path_oid_val, train_version, epochs, batch_size, dimensions, ratio)
-    train_vgg(path_places36_train, path_places36_val, train_version, epochs, batch_size, dimensions, ratio)
-    # train_srgan(path_oid_test, path_oid_val, train_version, epochs, batch_size, dimensions, ratio)
+    # train_generator(path_places36_train, path_places36_val, train_version, epochs, batch_size, dimensions, ratio)
+    # train_discriminator(path_places36_train, path_places36_val, train_version, epochs, batch_size, dimensions, ratio)
+    # train_vgg(path_places36_train, path_places36_val, train_version, epochs, batch_size, dimensions, ratio)
+    train_srgan(path_oid_test, path_oid_val, train_version, epochs, batch_size, dimensions, ratio)
 
+    # train_generator_cifar(train_version, epochs, batch_size, dimensions, ratio)
+    # train_vgg_cifar(train_version, epochs, batch_size, dimensions, ratio)
+
+
+def main_cifar():
+    # train_version 12 has fixed the divison by 255 !
+
+    train_version = 12
+    epochs = 5
+    batch_size = 128
+
+    ratio = 2
+    # dimensions = 256, 192, 3
+    # dimensions = 256, 256, 3
+    dimensions = 32, 32, 3
+
+    # train_generator_cifar(train_version, epochs, batch_size, dimensions, ratio)
+    # train_discriminator_cifar(train_version, epochs, batch_size, dimensions, ratio)
+    train_srgan_cifar(train_version, epochs, batch_size, dimensions, ratio)
     # train_vgg_cifar(train_version, epochs, batch_size, dimensions, ratio)
 
 
 if __name__ == '__main__':
-    main()
+    # main_places365()
+    main_cifar()
