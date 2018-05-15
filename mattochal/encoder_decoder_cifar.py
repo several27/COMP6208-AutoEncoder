@@ -120,7 +120,7 @@ def basic_dense_downscaler_cifar(x_train, y_train, x_test, y_test, epochs=5,
     return upscaler
 
 
-def basic_cnn_autoencoder_cifar(x_train, y_train, x_test, y_test, epochs=5,
+def basic_cnn_autoenco der_cifar(x_train, y_train, x_test, y_test, epochs=5,
                             retrain=False, model_filename="basic_cnn_autoencoder_cifar.h5"):
     if os.path.isfile(model_filename) and not retrain:
         upscaler = load_model(model_filename)

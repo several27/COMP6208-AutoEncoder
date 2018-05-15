@@ -3,3 +3,6 @@
 .DS_store
 *.ipynb_checkpoints*
 mattochal/.ipynb_checkpoints/
+mattochal/test/
+mattochal/val/
+mattochal/__pycache__
